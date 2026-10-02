@@ -1,0 +1,49 @@
+# Arquivos/Diretórios do Docker
+Dockerfile
+docker-compose.yml
+docker-compose.*.yml
+
+# Git
+.git/
+.gitignore
+
+# Dependências locais
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.npm/
+.yarn/
+.pnpm-store/
+
+# Next.js
+.next/
+.next/cache/
+
+# Builds locais
+dist/
+build/
+out/
+coverage/
+
+# Env e configs sensíveis
+.env
+.env*.local
+
+# Logs
+*.log
+
+# Testes
+*.spec.ts
+*.test.ts
+*.spec.js
+*.test.js
+
+# Sistema operacional
+.DS_Store
+Thumbs.db
+
+# Outros
+.idea/
+.vscode/

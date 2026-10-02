@@ -1,0 +1,17 @@
+version: '3'
+services:
+  app:
+    restart: always
+    image: worker-nestjs-teste
+    container_name: worker-nestjs-teste
+    build: 
+        context: .
+        dockerfile: Dockerfile
+    environment:
+      - NODE_ENV=production
+      - DB_HOST=${DB_HOST:?DB_HOST is required}
+      - DB_PORT=${DB_PORT:-3306}
+      - DB_USER=${DB_USER:?DB_USER is required}
+      - DB_PASSWORD=${DB_PASSWORD:?DB_PASSWORD is required}
+      - DB_NAME=${DB_NAME:?DB_NAME is required}
+      - RABBITMQ_URI=${RABBITMQ_URI:?RABBITMQ_URI is required}
