@@ -1,6 +1,7 @@
 import {
   Injectable,
   Logger,
+  NotFoundException,
   ServiceUnavailableException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -43,5 +44,28 @@ export class NotificationsService {
     }
 
     return { id: saved.id, status: saved.status };
+  }
+
+  async findById(
+    id: string,
+  ): Promise<
+    Pick<
+      Notification,
+      'id' | 'type' | 'recipient' | 'status' | 'createdAt' | 'processedAt'
+    >
+  > {
+    const notification = await this.notifications.findOneBy({ id });
+    if (!notification) {
+      throw new NotFoundException('Notification not found');
+    }
+
+    return {
+      id: notification.id,
+      type: notification.type,
+      recipient: notification.recipient,
+      status: notification.status,
+      createdAt: notification.createdAt,
+      processedAt: notification.processedAt,
+    };
   }
 }

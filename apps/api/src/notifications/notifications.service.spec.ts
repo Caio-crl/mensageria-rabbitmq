@@ -1,4 +1,8 @@
-import { HttpStatus, ServiceUnavailableException } from '@nestjs/common';
+import {
+  HttpStatus,
+  NotFoundException,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { Notification } from '../../../../libs/notifications/src/notification.entity';
 import {
@@ -25,12 +29,19 @@ describe('NotificationsService', () => {
     const save = jest
       .fn()
       .mockImplementation(async (input: Notification) => ({ ...input, id }));
-    const repository = { create, save } as unknown as Repository<Notification>;
+    const findOneBy = jest.fn();
+    const repository = {
+      create,
+      save,
+      findOneBy,
+    } as unknown as Repository<Notification>;
     const publisher = { publish } as unknown as NotificationPublisher;
     return {
       service: new NotificationsService(repository, publisher),
       create,
       save,
+      findOneBy,
+      publish,
     };
   }
 
@@ -77,5 +88,48 @@ describe('NotificationsService', () => {
     await expect(save.mock.results[0].value).resolves.toEqual(
       expect.objectContaining({ id, status: NotificationStatus.PENDING }),
     );
+  });
+
+  it.each([
+    [NotificationStatus.PENDING, null],
+    [NotificationStatus.PROCESSING, null],
+    [NotificationStatus.SENT, new Date('2026-10-03T12:00:05.000Z')],
+    [NotificationStatus.FAILED, new Date('2026-10-03T12:00:05.000Z')],
+  ])('returns only public fields for %s', async (status, processedAt) => {
+    const { service, findOneBy, save, publish } = createService(jest.fn());
+    const createdAt = new Date('2026-10-03T12:00:00.000Z');
+    findOneBy.mockResolvedValue({
+      id,
+      type: NotificationType.EMAIL,
+      recipient: 'user@example.com',
+      status,
+      createdAt,
+      processedAt,
+      subject: 'private subject',
+      message: 'private message',
+      updatedAt: new Date(),
+    } as Notification);
+
+    await expect(service.findById(id)).resolves.toEqual({
+      id,
+      type: NotificationType.EMAIL,
+      recipient: 'user@example.com',
+      status,
+      createdAt,
+      processedAt,
+    });
+    expect(findOneBy).toHaveBeenCalledWith({ id });
+    expect(save).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 for a valid UUID missing from the database', async () => {
+    const { service, findOneBy } = createService(jest.fn());
+    findOneBy.mockResolvedValue(null);
+
+    await expect(service.findById(id)).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+    expect(findOneBy).toHaveBeenCalledWith({ id });
   });
 });

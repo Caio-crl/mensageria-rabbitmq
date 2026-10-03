@@ -1,4 +1,13 @@
-import { Body, Controller, HttpCode, HttpStatus, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Post,
+} from '@nestjs/common';
 import { CreateNotificationDto } from './create-notification.dto';
 import { NotificationsService } from './notifications.service';
 
@@ -10,5 +19,10 @@ export class NotificationsController {
   @HttpCode(HttpStatus.ACCEPTED)
   create(@Body() dto: CreateNotificationDto) {
     return this.notificationsService.create(dto);
+  }
+
+  @Get(':id')
+  findById(@Param('id', new ParseUUIDPipe()) id: string) {
+    return this.notificationsService.findById(id);
   }
 }
