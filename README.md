@@ -1,17 +1,16 @@
-# Nome do projeto: worker-nestjs-teste
+# Notification Service
 
-## Descrição
+NestJS monorepo foundation with two independent applications:
 
-Serviço NestJS com API, MySQL e RabbitMQ.
+- api: HTTP application
+- worker: standalone Nest application context
 
-## Configuração
+## Development
 
-Defina as variáveis de ambiente antes de iniciar a aplicação ou usar o Docker Compose:
+Install dependencies with npm install. Run npm run start:dev:api to start the
+HTTP application, or npm run start:dev:worker to initialize the worker.
+The worker exits after initialization until a consumer is introduced in a
+later checkpoint.
 
-- `DB_HOST`: endereço do MySQL;
-- `DB_PORT`: porta do MySQL (padrão: `3306`);
-- `DB_USER`: usuário do MySQL;
-- `DB_PASSWORD`: senha do MySQL;
-- `DB_NAME`: nome do banco de dados;
-- `RABBITMQ_URI`: URI de conexão com o RabbitMQ.
-
+Run npm run build, npm run lint, npm run format:check, and npm test to validate
+the foundation.
