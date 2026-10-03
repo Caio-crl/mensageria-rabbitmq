@@ -1,15 +1,23 @@
-import { Injectable } from '@nestjs/common';
+import {
+  Injectable,
+  Logger,
+  ServiceUnavailableException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Notification } from '../../../../libs/notifications/src/notification.entity';
 import { NotificationStatus } from '../../../../libs/notifications/src/notification.enums';
 import { CreateNotificationDto } from './create-notification.dto';
+import { NotificationPublisher } from './notification.publisher';
 
 @Injectable()
 export class NotificationsService {
+  private readonly logger = new Logger(NotificationsService.name);
+
   constructor(
     @InjectRepository(Notification)
     private readonly notifications: Repository<Notification>,
+    private readonly publisher: NotificationPublisher,
   ) {}
 
   async create(
@@ -24,6 +32,15 @@ export class NotificationsService {
       processedAt: null,
     });
     const saved = await this.notifications.save(notification);
+
+    try {
+      await this.publisher.publish(saved.id);
+    } catch (error) {
+      this.logger.error(`Failed to publish notification ${saved.id}`, error);
+      throw new ServiceUnavailableException(
+        'Notification publication unavailable',
+      );
+    }
 
     return { id: saved.id, status: saved.status };
   }

@@ -4,6 +4,7 @@ import { ApiModule } from './api.module';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(ApiModule);
+  app.enableShutdownHooks();
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,

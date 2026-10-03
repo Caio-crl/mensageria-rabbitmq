@@ -1,6 +1,7 @@
 import { Test } from '@nestjs/testing';
 import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
 import { Notification } from '../../../libs/notifications/src/notification.entity';
+import { NotificationPublisher } from './notifications/notification.publisher';
 import { ApiModule } from './api.module';
 
 describe('ApiModule', () => {
@@ -12,6 +13,8 @@ describe('ApiModule', () => {
       .overrideProvider(getDataSourceToken())
       .useValue(dataSource)
       .overrideProvider(getRepositoryToken(Notification))
+      .useValue({})
+      .overrideProvider(NotificationPublisher)
       .useValue({})
       .compile();
 

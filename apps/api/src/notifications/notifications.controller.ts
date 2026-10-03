@@ -7,7 +7,7 @@ export class NotificationsController {
   constructor(private readonly notificationsService: NotificationsService) {}
 
   @Post()
-  @HttpCode(HttpStatus.CREATED)
+  @HttpCode(HttpStatus.ACCEPTED)
   create(@Body() dto: CreateNotificationDto) {
     return this.notificationsService.create(dto);
   }
