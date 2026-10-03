@@ -1,5 +1,6 @@
 import { INestApplication, NotFoundException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
+import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { NotificationsController } from './notifications.controller';
 import { NotificationsService } from './notifications.service';
 
@@ -69,5 +70,35 @@ describe('NotificationsController GET /notifications/:id', () => {
 
     expect(response.status).toBe(404);
     expect(findById).not.toHaveBeenCalled();
+  });
+
+  it('documents only the public notification operations and fields', () => {
+    const document = SwaggerModule.createDocument(
+      app,
+      new DocumentBuilder().setTitle('Notification Service API').build(),
+    );
+
+    expect(Object.keys(document.paths).sort()).toEqual([
+      '/notifications',
+      '/notifications/{id}',
+    ]);
+    expect(
+      Object.keys(document.paths['/notifications'].post!.responses),
+    ).toEqual(['202', '400', '503']);
+    expect(
+      Object.keys(document.paths['/notifications/{id}'].get!.responses),
+    ).toEqual(['200', '400', '404']);
+    expect(document.components?.schemas).toMatchObject({
+      NotificationType: { enum: ['EMAIL'] },
+      NotificationStatus: {
+        enum: ['PENDING', 'PROCESSING', 'SENT', 'FAILED'],
+      },
+      NotificationResponseDto: {
+        properties: { processedAt: { nullable: true } },
+      },
+    });
+    expect(
+      JSON.stringify(document.components?.schemas?.NotificationResponseDto),
+    ).not.toMatch(/subject|message|updatedAt/);
   });
 });

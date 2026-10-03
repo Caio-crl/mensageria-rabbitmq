@@ -20,7 +20,7 @@ describe('Notification persistence configuration', () => {
     });
   });
 
-  it('defines only the notification types and statuses in this checkpoint', () => {
+  it('defines the supported notification types and statuses', () => {
     expect(Object.values(NotificationType)).toEqual(['EMAIL']);
     expect(Object.values(NotificationStatus)).toEqual([
       'PENDING',

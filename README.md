@@ -1,89 +1,139 @@
 # Notification Service
 
-NestJS monorepo foundation with two independent applications:
+A small asynchronous notification service built with NestJS. The API persists a
+request and returns after RabbitMQ confirms publication; an independent worker
+processes it in the background. RabbitMQ decouples HTTP request handling from
+processing and holds work while the worker is offline.
 
-- api: HTTP application
-- worker: standalone Nest application context
+The sender is deterministic and simulated. No external email service is called.
 
-Notification persistence is shared from `libs/notifications`. MySQL schema changes
-are applied only through TypeORM migrations; automatic synchronization is disabled.
+## Stack
 
-## Development
+NestJS, TypeScript, MySQL, TypeORM, RabbitMQ, Docker Compose, Jest, and
+Swagger/OpenAPI.
 
-Install dependencies with npm install. Run npm run start:dev:api to start the
-HTTP application and npm run start:dev:worker to start the independent worker.
+## Architecture
 
-Copy `.env.example` to `.env`, then start MySQL and RabbitMQ with
-`docker compose up -d --wait mysql rabbitmq`. The example exposes MySQL on
-localhost port 3307, RabbitMQ AMQP on 5672, and its Management UI on 15672.
-Run `npm run migration:run` to create the `notifications` table. Use
-`npm run migration:revert` to undo the last migration. Both applications need
-MySQL running with the migration applied.
+```mermaid
+flowchart LR
+  Client -->|POST /notifications| API
+  Client -->|GET /notifications/:id| API
+  API <-->|persist and read| MySQL
+  API --> Publisher[NotificationPublisher]
+  Publisher -->|persistent publish + confirm| Exchange["notifications.exchange<br/>direct"]
+  Exchange --> Main["notifications.process"]
+  Main --> Worker
+  Worker -->|update status| MySQL
+  Worker -->|failed attempt 1 or 2| Retry["notifications.retry<br/>TTL 5 s"]
+  Retry -->|dead-letter after TTL| Exchange
+  Main -->|rejected without requeue| DLX["notifications.dlx"]
+  DLX --> DLQ["notifications.dlq"]
+```
 
-`POST /notifications` creates an EMAIL notification, saves it as PENDING, and
-publishes a persistent message to RabbitMQ. After publisher confirm it returns
-HTTP 202 with
-`{"id":"uuid","status":"PENDING"}`. The request body contains `recipient`,
-`type`, `subject`, and `message`; server-managed fields are not accepted.
-The durable direct exchange `notifications.exchange` routes
-`notification.requested` to the durable queue `notifications.process`. The
-message contains `messageId`, `notificationId`, `event`, `version`, and
-`occurredAt`, without notification content.
+```text
+apps/
+  api/                 HTTP API and RabbitMQ publisher
+  worker/              RabbitMQ consumer and simulated sender
+libs/
+  notifications/       Entity, migration, message contract, and topology
+docker-compose.yml     Local MySQL and RabbitMQ
+```
 
-After the POST returns 202 and an id, poll `GET /notifications/:id` to read the
-current database status (HTTP 200). For example, after processing:
-`{"id":"uuid","type":"EMAIL","recipient":"user@example.com","status":"SENT","createdAt":"2026-10-03T12:00:00.000Z","processedAt":"2026-10-03T12:00:05.000Z"}`.
-Before completion, `processedAt` is null. An invalid UUID returns 400; an
-unknown valid UUID returns 404.
-API timestamps are serialized as ISO-8601 in UTC. Existing local Notifications
-written before the UTC driver setting may contain timestamps interpreted under
-the previous local timezone; this checkpoint does not rewrite those rows.
+The API and worker share the Notification entity and RabbitMQ contract. Schema
+changes use TypeORM migrations; automatic synchronization is disabled.
 
-Publication has a 5000 ms timeout. If it fails, the API returns HTTP 503 while
-the database row remains PENDING. This MySQL/RabbitMQ consistency gap is a known
-MVP limitation. A publisher confirm timeout can also mean an unknown result:
-the broker may receive the message after the API returns 503.
+## Run locally
 
-The worker consumes `notifications.process` with prefetch 1 and manual
-acknowledgement. Successful processing saves PROCESSING, then SENT and
-`processedAt` before ack. The `x-attempt` header starts at 1 (or defaults to 1
-for older messages). Fake sender failures allow 3 total attempts: after attempts
-1 and 2, the worker saves PENDING with `processedAt = null`, confirms publication
-to `notifications.retry`, then acks the original. The durable retry queue uses a
-fixed 5000 ms TTL and dead-letters back to `notifications.process`. On attempt 3,
-the worker saves FAILED and `processedAt`, then nacks without requeue into
-`notifications.dlq`. Set `FAKE_EMAIL_FORCE_FAILURE=true` locally to exercise
-this path deterministically; the default fake sender succeeds without external
-calls.
+Requirements: Node.js 20 or newer, npm, and Docker with Compose. Ports 3000,
+3307, 5672, and 15672 must be available.
 
-SENT redelivery is acked without another send. FAILED final redelivery is sent
-again to the DLQ; PROCESSING can be reprocessed. Invalid messages and missing
-Notifications go straight to the DLQ. Database or retry publication failures
-use `nack(requeue=true)` exceptionally, without ack. Delivery is at least once,
-so duplicates remain possible around connection or confirm failures. This MVP
-declares DLX and TTL as queue arguments. RabbitMQ policies are preferable in
-production when operators need to change these settings without recreating
-queues. An existing local `notifications.process` queue without DLX arguments
-must be replaced only after confirming it has zero Ready and Unacked messages.
+1. Install dependencies: `npm ci --no-audit --no-fund`.
+2. Copy `.env.example` to `.env` and review the local settings. On PowerShell,
+   use `Copy-Item .env.example .env`.
+3. Start infrastructure: `docker compose up -d --wait mysql rabbitmq`.
+4. Apply the schema: `npm run migration:run`.
+5. Start the API: `npm run start:dev:api`.
+6. In another terminal, start the worker: `npm run start:dev:worker`.
 
-## Delivery semantics and idempotency
+API: `http://localhost:3000` · Swagger UI: `http://localhost:3000/docs` ·
+OpenAPI JSON: `http://localhost:3000/docs-json` · RabbitMQ Management UI:
+`http://localhost:15672` (local credentials from `.env.example`). Docker
+Compose runs only MySQL and RabbitMQ; API and worker run as separate NestJS apps.
 
-This flow uses at-least-once delivery: RabbitMQ redelivery is expected after a
-worker or connection failure. The persisted Notification status is the MVP's
-idempotency guard. Once SENT is saved, another delivery is acked without sending
-again. A final FAILED delivery is rejected into the DLQ without sending again.
-PENDING and PROCESSING remain processable because a worker can die after saving
-PROCESSING but before completing the work.
+## Use the API
 
-One crash window remains: an external effect can succeed, then saving SENT can
-fail. Redelivery can run the effect again while the row remains PROCESSING. A real
-provider's idempotency key, based on a stable notificationId or messageId, could
-reduce this risk in a future integration. Another window exists after retry
-publisher confirm but before ack of the original: both the confirmed retry and
-the redelivered original can exist, with the same messageId. Neither window
-provides exactly-once processing. The current prefetch of 1 limits this worker's
-concurrency; multiple concurrent consumers would need additional protection
-against races on the same Notification, outside this MVP.
+```bash
+curl -i -X POST http://localhost:3000/notifications -H 'Content-Type: application/json' -d '{"recipient":"user@example.com","type":"EMAIL","subject":"Welcome","message":"Welcome to the platform"}'
+```
 
-Run npm run build, npm run lint, npm run format:check, and npm test to validate
-the foundation.
+The API saves a `PENDING` row, publishes a persistent message, waits for a
+publisher confirm, and then returns HTTP 202:
+
+```json
+{"id":"6cdb2202-054d-4420-8058-eacc8ecdde25","status":"PENDING"}
+```
+
+Use the returned ID to read the current state from MySQL:
+
+```bash
+curl -i http://localhost:3000/notifications/6cdb2202-054d-4420-8058-eacc8ecdde25
+```
+
+After processing, a response can look like:
+
+```json
+{"id":"6cdb2202-054d-4420-8058-eacc8ecdde25","type":"EMAIL","recipient":"user@example.com","status":"SENT","createdAt":"2026-10-03T12:00:00.000Z","processedAt":"2026-10-03T12:00:05.000Z"}
+```
+
+`GET /notifications/:id` returns HTTP 200 and only `id`, `type`, `recipient`,
+`status`, `createdAt`, and `processedAt`. Timestamps are ISO-8601 UTC;
+`processedAt` is null until processing reaches a terminal state. A malformed
+UUID returns 400 and an unknown valid UUID returns 404. There is no list route.
+
+## Processing and failures
+
+Success: `PENDING → PROCESSING → simulated send → SENT + processedAt → ack`.
+The API does not wait for the worker. A client may observe `PENDING` or
+`PROCESSING` before `SENT`.
+With repeated sender failures: `PENDING → PROCESSING → retry → FAILED`.
+
+The worker uses manual acknowledgement and prefetch 1. New messages carry
+`x-attempt: 1`; an absent header is treated as attempt 1. A sender failure on
+attempt 1 or 2 saves `PENDING` with `processedAt = null`, publishes the same
+payload and `messageId` to `notifications.retry`, waits for publisher confirm,
+and only then acks the original. The retry queue has a fixed 5-second TTL and
+dead-letters back to `notifications.process`. There are 3 total attempts. A
+third sender failure saves `FAILED + processedAt` and rejects the message to
+`notifications.dlq`. Invalid payloads and messages whose Notification does not
+exist also go directly to the DLQ. Set `FAKE_EMAIL_FORCE_FAILURE=true` only for
+local retry testing; restore it to `false` afterward. Unexpected database or
+retry publication failures may exceptionally use `nack(requeue=true)` to
+preserve the original message; that is separate from the delayed retry policy.
+
+Delivery is at least once, so redelivery is expected. Persisted `SENT` and
+final `FAILED` prevent another simulated send. `PROCESSING` remains
+reprocessable because a worker may have stopped before completion. A real
+external effect could happen before the terminal status is saved, allowing a
+duplicate effect on redelivery. A confirmed retry can also coexist with a
+redelivered original if the original ack is lost. Multiple concurrent consumers
+would need additional protection against races on one Notification; this MVP
+uses one worker process. A real provider's idempotency key could reduce duplicate
+effects in a future integration.
+
+There is also a MySQL/RabbitMQ consistency gap: a MySQL commit may succeed and
+publication may fail, leaving a `PENDING` Notification without a corresponding
+message. The API returns 503 in that case. A publisher confirm timeout can have
+an unknown outcome. Transactional Outbox is a possible future improvement and
+is not implemented here.
+
+All exchanges and queues are durable. The MVP declares DLX and TTL as queue
+arguments; RabbitMQ policies are preferable where operators need to change
+them without replacing queues. Replace an older local `notifications.process`
+queue lacking DLX arguments only after verifying it has zero Ready and Unacked
+messages. Existing local rows written before UTC driver configuration may have
+inconsistent timestamps; this project does not rewrite them.
+
+## Validate
+
+Run `npm ls --depth=0`, `npm run build`, `npm run lint`,
+`npm run format:check`, and `npm test`.
