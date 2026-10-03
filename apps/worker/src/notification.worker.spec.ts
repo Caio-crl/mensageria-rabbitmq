@@ -134,6 +134,48 @@ describe('NotificationWorker', () => {
     },
   );
 
+  it('does not send again when the same message is delivered after SENT', async () => {
+    const context = setup();
+    const redelivery = {
+      content,
+      properties: { headers: { 'x-attempt': 1 } },
+      fields: { redelivered: true },
+    } as unknown as ConsumeMessage;
+
+    await context.worker.handleDelivery(context.channel, delivery);
+    await context.worker.handleDelivery(context.channel, redelivery);
+
+    expect(context.findOneBy).toHaveBeenCalledTimes(2);
+    expect(context.send).toHaveBeenCalledTimes(1);
+    expect(context.save).toHaveBeenCalledTimes(2);
+    expect(context.ack).toHaveBeenNthCalledWith(1, delivery);
+    expect(context.ack).toHaveBeenNthCalledWith(2, redelivery);
+    expect(context.nack).not.toHaveBeenCalled();
+  });
+
+  it('acks SENT redelivery after the first ack fails', async () => {
+    const context = setup();
+    const redelivery = {
+      content,
+      properties: { headers: { 'x-attempt': 1 } },
+      fields: { redelivered: true },
+    } as unknown as ConsumeMessage;
+    context.ack.mockImplementationOnce(() => {
+      throw new Error('connection lost before ack');
+    });
+
+    await context.worker.handleDelivery(context.channel, delivery);
+    expect(context.notification.status).toBe(NotificationStatus.SENT);
+    expect(context.notification.processedAt).toBeInstanceOf(Date);
+    expect(context.nack).toHaveBeenCalledWith(delivery, false, true);
+
+    await context.worker.handleDelivery(context.channel, redelivery);
+
+    expect(context.send).toHaveBeenCalledTimes(1);
+    expect(context.save).toHaveBeenCalledTimes(2);
+    expect(context.ack).toHaveBeenLastCalledWith(redelivery);
+  });
+
   it('reprocesses PROCESSING redelivery', async () => {
     const context = setup(NotificationStatus.PROCESSING);
 
@@ -232,6 +274,45 @@ describe('NotificationWorker', () => {
     expect(context.nack).toHaveBeenCalledWith(delivery, false, true);
   });
 
+  it('allows original redelivery and confirmed retry to coexist after ack failure', async () => {
+    const context = setup();
+    failSender(context);
+    context.ack.mockImplementationOnce(() => {
+      throw new Error('connection lost before ack');
+    });
+
+    await context.worker.handleDelivery(context.channel, delivery);
+
+    expect(context.retryPublish).toHaveBeenCalledWith(
+      'notifications.retry.exchange',
+      'notification.retry',
+      content,
+      expect.objectContaining({ messageId, headers: { 'x-attempt': 2 } }),
+    );
+    expect(context.nack).toHaveBeenCalledWith(delivery, false, true);
+    expect(context.notification.status).toBe(NotificationStatus.PENDING);
+
+    context.send.mockImplementation(async () => context.events.push('send'));
+    const redeliveredOriginal = {
+      content,
+      properties: { headers: { 'x-attempt': 1 } },
+      fields: { redelivered: true },
+    } as unknown as ConsumeMessage;
+    const confirmedRetry = {
+      content,
+      properties: { headers: { 'x-attempt': 2 } },
+    } as unknown as ConsumeMessage;
+
+    await context.worker.handleDelivery(context.channel, redeliveredOriginal);
+    await context.worker.handleDelivery(context.channel, confirmedRetry);
+
+    expect(context.send).toHaveBeenCalledTimes(2);
+    expect(context.retryPublish).toHaveBeenCalledTimes(1);
+    expect(context.notification.status).toBe(NotificationStatus.SENT);
+    expect(context.ack).toHaveBeenCalledWith(redeliveredOriginal);
+    expect(context.ack).toHaveBeenCalledWith(confirmedRetry);
+  });
+
   it('persists FAILED with processedAt and dead-letters attempt 3', async () => {
     const context = setup();
     failSender(context);
@@ -321,6 +402,43 @@ describe('NotificationWorker', () => {
 
     expect(context.nack).toHaveBeenCalledWith(delivery, false, true);
     expect(context.ack).not.toHaveBeenCalled();
+  });
+
+  it('may send again when saving SENT fails after the effect', async () => {
+    const context = setup();
+    let persistedStatus = NotificationStatus.PENDING;
+    let saveCount = 0;
+    context.findOneBy.mockImplementation(async () => ({
+      id: notificationId,
+      status: persistedStatus,
+      processedAt: null,
+    }));
+    context.save.mockImplementation(async (item: Notification) => {
+      saveCount += 1;
+      if (saveCount === 2) {
+        throw new Error('database unavailable after send');
+      }
+      persistedStatus = item.status;
+      return item;
+    });
+
+    await context.worker.handleDelivery(context.channel, delivery);
+
+    expect(context.send).toHaveBeenCalledTimes(1);
+    expect(persistedStatus).toBe(NotificationStatus.PROCESSING);
+    expect(context.ack).not.toHaveBeenCalled();
+    expect(context.nack).toHaveBeenCalledWith(delivery, false, true);
+
+    const redelivery = {
+      content,
+      properties: { headers: { 'x-attempt': 1 } },
+      fields: { redelivered: true },
+    } as unknown as ConsumeMessage;
+    await context.worker.handleDelivery(context.channel, redelivery);
+
+    expect(context.send).toHaveBeenCalledTimes(2);
+    expect(persistedStatus).toBe(NotificationStatus.SENT);
+    expect(context.ack).toHaveBeenCalledWith(redelivery);
   });
 
   it('declares topology, prefetches one, consumes with manual ack, and closes', async () => {

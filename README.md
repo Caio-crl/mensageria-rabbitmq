@@ -57,5 +57,24 @@ production when operators need to change these settings without recreating
 queues. An existing local `notifications.process` queue without DLX arguments
 must be replaced only after confirming it has zero Ready and Unacked messages.
 
+## Delivery semantics and idempotency
+
+This flow uses at-least-once delivery: RabbitMQ redelivery is expected after a
+worker or connection failure. The persisted Notification status is the MVP's
+idempotency guard. Once SENT is saved, another delivery is acked without sending
+again. A final FAILED delivery is rejected into the DLQ without sending again.
+PENDING and PROCESSING remain processable because a worker can die after saving
+PROCESSING but before completing the work.
+
+One crash window remains: an external effect can succeed, then saving SENT can
+fail. Redelivery can run the effect again while the row remains PROCESSING. A real
+provider's idempotency key, based on a stable notificationId or messageId, could
+reduce this risk in a future integration. Another window exists after retry
+publisher confirm but before ack of the original: both the confirmed retry and
+the redelivered original can exist, with the same messageId. Neither window
+provides exactly-once processing. The current prefetch of 1 limits this worker's
+concurrency; multiple concurrent consumers would need additional protection
+against races on the same Notification, outside this MVP.
+
 Run npm run build, npm run lint, npm run format:check, and npm test to validate
 the foundation.
