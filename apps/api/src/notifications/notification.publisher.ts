@@ -6,10 +6,14 @@ import {
   type ChannelWrapper,
 } from 'amqp-connection-manager';
 import type { ConfirmChannel } from 'amqplib';
+import {
+  NOTIFICATION_EXCHANGE,
+  NOTIFICATION_MESSAGE_VERSION,
+  NOTIFICATION_PROCESS_QUEUE,
+  NOTIFICATION_REQUESTED_ROUTING_KEY,
+  type NotificationRequestedMessage,
+} from '../../../../libs/notifications/src/notification-requested.message';
 
-const EXCHANGE = 'notifications.exchange';
-const QUEUE = 'notifications.process';
-const ROUTING_KEY = 'notification.requested';
 const PUBLISH_TIMEOUT_MS = 5000;
 
 @Injectable()
@@ -30,9 +34,17 @@ export class NotificationPublisher implements OnApplicationShutdown {
       confirm: true,
       publishTimeout: PUBLISH_TIMEOUT_MS,
       setup: async (channel: ConfirmChannel) => {
-        await channel.assertExchange(EXCHANGE, 'direct', { durable: true });
-        await channel.assertQueue(QUEUE, { durable: true });
-        await channel.bindQueue(QUEUE, EXCHANGE, ROUTING_KEY);
+        await channel.assertExchange(NOTIFICATION_EXCHANGE, 'direct', {
+          durable: true,
+        });
+        await channel.assertQueue(NOTIFICATION_PROCESS_QUEUE, {
+          durable: true,
+        });
+        await channel.bindQueue(
+          NOTIFICATION_PROCESS_QUEUE,
+          NOTIFICATION_EXCHANGE,
+          NOTIFICATION_REQUESTED_ROUTING_KEY,
+        );
       },
     });
     this.channel.on('error', (error: Error) =>
@@ -42,17 +54,17 @@ export class NotificationPublisher implements OnApplicationShutdown {
 
   async publish(notificationId: string): Promise<void> {
     const messageId = randomUUID();
-    const payload = {
+    const payload: NotificationRequestedMessage = {
       messageId,
       notificationId,
-      event: ROUTING_KEY,
-      version: 1,
+      event: NOTIFICATION_REQUESTED_ROUTING_KEY,
+      version: NOTIFICATION_MESSAGE_VERSION,
       occurredAt: new Date().toISOString(),
     };
 
     await this.channel.publish(
-      EXCHANGE,
-      ROUTING_KEY,
+      NOTIFICATION_EXCHANGE,
+      NOTIFICATION_REQUESTED_ROUTING_KEY,
       Buffer.from(JSON.stringify(payload)),
       {
         persistent: true,

@@ -11,16 +11,14 @@ are applied only through TypeORM migrations; automatic synchronization is disabl
 ## Development
 
 Install dependencies with npm install. Run npm run start:dev:api to start the
-HTTP application, or npm run start:dev:worker to initialize the worker.
-The worker exits after initialization until a consumer is introduced in a
-later checkpoint.
+HTTP application and npm run start:dev:worker to start the independent worker.
 
 Copy `.env.example` to `.env`, then start MySQL and RabbitMQ with
 `docker compose up -d --wait mysql rabbitmq`. The example exposes MySQL on
 localhost port 3307, RabbitMQ AMQP on 5672, and its Management UI on 15672.
-Run `npm run migration:run` to
-create the `notifications` table. Use `npm run migration:revert` to undo the last
-migration. The API needs MySQL running with the migration applied.
+Run `npm run migration:run` to create the `notifications` table. Use
+`npm run migration:revert` to undo the last migration. Both applications need
+MySQL running with the migration applied.
 
 `POST /notifications` creates an EMAIL notification, saves it as PENDING, and
 publishes a persistent message to RabbitMQ. After publisher confirm it returns
@@ -36,6 +34,16 @@ Publication has a 5000 ms timeout. If it fails, the API returns HTTP 503 while
 the database row remains PENDING. This MySQL/RabbitMQ consistency gap is a known
 MVP limitation. A publisher confirm timeout can also mean an unknown result:
 the broker may receive the message after the API returns 503.
+
+The worker consumes `notifications.process` with prefetch 1 and manual
+acknowledgement. It loads each Notification from MySQL, saves PROCESSING, runs
+the deterministic FakeEmailSender, then saves SENT and `processedAt` before
+acknowledging the message. A fake sender failure saves FAILED and `processedAt`
+before acknowledgement. Messages for already SENT or FAILED Notifications are
+acknowledged without sending again; PROCESSING can be reprocessed after
+redelivery. Invalid messages and missing Notifications are discarded without
+requeue. Database failures receive nack with requeue, without ack.
+There is no retry queue or DLQ yet.
 
 Run npm run build, npm run lint, npm run format:check, and npm test to validate
 the foundation.
