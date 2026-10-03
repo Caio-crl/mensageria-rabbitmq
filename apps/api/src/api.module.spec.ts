@@ -1,5 +1,6 @@
 import { Test } from '@nestjs/testing';
-import { getDataSourceToken } from '@nestjs/typeorm';
+import { getDataSourceToken, getRepositoryToken } from '@nestjs/typeorm';
+import { Notification } from '../../../libs/notifications/src/notification.entity';
 import { ApiModule } from './api.module';
 
 describe('ApiModule', () => {
@@ -10,6 +11,8 @@ describe('ApiModule', () => {
     })
       .overrideProvider(getDataSourceToken())
       .useValue(dataSource)
+      .overrideProvider(getRepositoryToken(Notification))
+      .useValue({})
       .compile();
 
     expect(module.get(ApiModule)).toBeInstanceOf(ApiModule);
