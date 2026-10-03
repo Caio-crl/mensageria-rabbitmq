@@ -8,13 +8,13 @@ import {
 import type { ConfirmChannel } from 'amqplib';
 import {
   NOTIFICATION_EXCHANGE,
+  NOTIFICATION_ATTEMPT_HEADER,
   NOTIFICATION_MESSAGE_VERSION,
-  NOTIFICATION_PROCESS_QUEUE,
+  NOTIFICATION_PUBLISH_TIMEOUT_MS,
   NOTIFICATION_REQUESTED_ROUTING_KEY,
   type NotificationRequestedMessage,
 } from '../../../../libs/notifications/src/notification-requested.message';
-
-const PUBLISH_TIMEOUT_MS = 5000;
+import { assertNotificationTopology } from '../../../../libs/notifications/src/notification.topology';
 
 @Injectable()
 export class NotificationPublisher implements OnApplicationShutdown {
@@ -32,20 +32,8 @@ export class NotificationPublisher implements OnApplicationShutdown {
     this.connection.on('connect', () => this.logger.log('RabbitMQ connected'));
     this.channel = this.connection.createChannel({
       confirm: true,
-      publishTimeout: PUBLISH_TIMEOUT_MS,
-      setup: async (channel: ConfirmChannel) => {
-        await channel.assertExchange(NOTIFICATION_EXCHANGE, 'direct', {
-          durable: true,
-        });
-        await channel.assertQueue(NOTIFICATION_PROCESS_QUEUE, {
-          durable: true,
-        });
-        await channel.bindQueue(
-          NOTIFICATION_PROCESS_QUEUE,
-          NOTIFICATION_EXCHANGE,
-          NOTIFICATION_REQUESTED_ROUTING_KEY,
-        );
-      },
+      publishTimeout: NOTIFICATION_PUBLISH_TIMEOUT_MS,
+      setup: (channel: ConfirmChannel) => assertNotificationTopology(channel),
     });
     this.channel.on('error', (error: Error) =>
       this.logger.error('RabbitMQ channel setup failed', error),
@@ -70,6 +58,7 @@ export class NotificationPublisher implements OnApplicationShutdown {
         persistent: true,
         contentType: 'application/json',
         messageId,
+        headers: { [NOTIFICATION_ATTEMPT_HEADER]: 1 },
       },
     );
   }

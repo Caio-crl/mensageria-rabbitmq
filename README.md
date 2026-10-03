@@ -36,14 +36,26 @@ MVP limitation. A publisher confirm timeout can also mean an unknown result:
 the broker may receive the message after the API returns 503.
 
 The worker consumes `notifications.process` with prefetch 1 and manual
-acknowledgement. It loads each Notification from MySQL, saves PROCESSING, runs
-the deterministic FakeEmailSender, then saves SENT and `processedAt` before
-acknowledging the message. A fake sender failure saves FAILED and `processedAt`
-before acknowledgement. Messages for already SENT or FAILED Notifications are
-acknowledged without sending again; PROCESSING can be reprocessed after
-redelivery. Invalid messages and missing Notifications are discarded without
-requeue. Database failures receive nack with requeue, without ack.
-There is no retry queue or DLQ yet.
+acknowledgement. Successful processing saves PROCESSING, then SENT and
+`processedAt` before ack. The `x-attempt` header starts at 1 (or defaults to 1
+for older messages). Fake sender failures allow 3 total attempts: after attempts
+1 and 2, the worker saves PENDING with `processedAt = null`, confirms publication
+to `notifications.retry`, then acks the original. The durable retry queue uses a
+fixed 5000 ms TTL and dead-letters back to `notifications.process`. On attempt 3,
+the worker saves FAILED and `processedAt`, then nacks without requeue into
+`notifications.dlq`. Set `FAKE_EMAIL_FORCE_FAILURE=true` locally to exercise
+this path deterministically; the default fake sender succeeds without external
+calls.
+
+SENT redelivery is acked without another send. FAILED final redelivery is sent
+again to the DLQ; PROCESSING can be reprocessed. Invalid messages and missing
+Notifications go straight to the DLQ. Database or retry publication failures
+use `nack(requeue=true)` exceptionally, without ack. Delivery is at least once,
+so duplicates remain possible around connection or confirm failures. This MVP
+declares DLX and TTL as queue arguments. RabbitMQ policies are preferable in
+production when operators need to change these settings without recreating
+queues. An existing local `notifications.process` queue without DLX arguments
+must be replaced only after confirming it has zero Ready and Unacked messages.
 
 Run npm run build, npm run lint, npm run format:check, and npm test to validate
 the foundation.

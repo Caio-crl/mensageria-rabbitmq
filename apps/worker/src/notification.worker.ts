@@ -10,17 +10,22 @@ import {
   type AmqpConnectionManager,
   type ChannelWrapper,
 } from 'amqp-connection-manager';
-import type { Channel, ConsumeMessage } from 'amqplib';
+import type { Channel, ConfirmChannel, ConsumeMessage } from 'amqplib';
 import { Repository } from 'typeorm';
 import { Notification } from '../../../libs/notifications/src/notification.entity';
 import { NotificationStatus } from '../../../libs/notifications/src/notification.enums';
 import {
-  NOTIFICATION_EXCHANGE,
+  NOTIFICATION_ATTEMPT_HEADER,
+  NOTIFICATION_MAX_ATTEMPTS,
   NOTIFICATION_MESSAGE_VERSION,
   NOTIFICATION_PROCESS_QUEUE,
+  NOTIFICATION_PUBLISH_TIMEOUT_MS,
   NOTIFICATION_REQUESTED_ROUTING_KEY,
+  NOTIFICATION_RETRY_EXCHANGE,
+  NOTIFICATION_RETRY_ROUTING_KEY,
   type NotificationRequestedMessage,
 } from '../../../libs/notifications/src/notification-requested.message';
+import { assertNotificationTopology } from '../../../libs/notifications/src/notification.topology';
 import { FakeEmailSender } from './fake-email.sender';
 
 const UUID_PATTERN =
@@ -76,19 +81,10 @@ export class NotificationWorker implements OnModuleInit, OnApplicationShutdown {
     this.connection = connect(url);
     this.connection.on('connect', () => this.logger.log('RabbitMQ connected'));
     this.channel = this.connection.createChannel({
-      confirm: false,
-      setup: async (channel: Channel) => {
-        await channel.assertExchange(NOTIFICATION_EXCHANGE, 'direct', {
-          durable: true,
-        });
-        await channel.assertQueue(NOTIFICATION_PROCESS_QUEUE, {
-          durable: true,
-        });
-        await channel.bindQueue(
-          NOTIFICATION_PROCESS_QUEUE,
-          NOTIFICATION_EXCHANGE,
-          NOTIFICATION_REQUESTED_ROUTING_KEY,
-        );
+      confirm: true,
+      publishTimeout: NOTIFICATION_PUBLISH_TIMEOUT_MS,
+      setup: async (channel: ConfirmChannel) => {
+        await assertNotificationTopology(channel);
         await channel.prefetch(1);
         await channel.consume(
           NOTIFICATION_PROCESS_QUEUE,
@@ -116,13 +112,24 @@ export class NotificationWorker implements OnModuleInit, OnApplicationShutdown {
     delivery: ConsumeMessage,
   ): Promise<void> {
     const message = parseMessage(delivery.content);
-    if (!message) {
+    const attemptHeader: unknown =
+      delivery.properties?.headers?.[NOTIFICATION_ATTEMPT_HEADER];
+    const attempt = attemptHeader === undefined ? 1 : attemptHeader;
+    if (
+      !message ||
+      typeof attempt !== 'number' ||
+      !Number.isInteger(attempt) ||
+      attempt < 1
+    ) {
       this.logger.warn('Invalid notification message discarded');
       channel.nack(delivery, false, false);
       return;
     }
 
     const { notificationId, messageId } = message;
+    this.logger.log(
+      `Processing notification ${notificationId}, message ${messageId}, attempt ${attempt}`,
+    );
     try {
       const notification = await this.notifications.findOneBy({
         id: notificationId,
@@ -135,14 +142,22 @@ export class NotificationWorker implements OnModuleInit, OnApplicationShutdown {
         return;
       }
 
-      if (
-        notification.status === NotificationStatus.SENT ||
-        notification.status === NotificationStatus.FAILED
-      ) {
+      if (notification.status === NotificationStatus.SENT) {
         this.logger.log(
-          `Notification ${notificationId} already ${notification.status}; acking message ${messageId}`,
+          `Notification ${notificationId} already SENT; acking message ${messageId}`,
         );
         channel.ack(delivery);
+        return;
+      }
+      if (notification.status === NotificationStatus.FAILED) {
+        this.logger.log(
+          `Notification ${notificationId} already FAILED; settling message ${messageId}, attempt ${attempt}`,
+        );
+        if (attempt >= NOTIFICATION_MAX_ATTEMPTS) {
+          channel.nack(delivery, false, false);
+        } else {
+          channel.ack(delivery);
+        }
         return;
       }
       if (
@@ -158,14 +173,56 @@ export class NotificationWorker implements OnModuleInit, OnApplicationShutdown {
       await this.notifications.save(notification);
       try {
         await this.sender.send(notification);
-        notification.status = NotificationStatus.SENT;
       } catch (error) {
         this.logger.error(
-          `Fake email failed for notification ${notificationId}, message ${messageId}`,
+          `Fake email failed for notification ${notificationId}, message ${messageId}, attempt ${attempt}`,
           error,
         );
+        if (attempt < NOTIFICATION_MAX_ATTEMPTS) {
+          notification.status = NotificationStatus.PENDING;
+          notification.processedAt = null;
+          await this.notifications.save(notification);
+          try {
+            if (!this.channel) {
+              throw new Error('RabbitMQ retry channel unavailable');
+            }
+            await this.channel.publish(
+              NOTIFICATION_RETRY_EXCHANGE,
+              NOTIFICATION_RETRY_ROUTING_KEY,
+              delivery.content,
+              {
+                persistent: true,
+                contentType: 'application/json',
+                messageId,
+                headers: { [NOTIFICATION_ATTEMPT_HEADER]: attempt + 1 },
+              },
+            );
+          } catch (publishError) {
+            this.logger.error(
+              `Retry publication failed for notification ${notificationId}, message ${messageId}, attempt ${attempt + 1}`,
+              publishError,
+            );
+            channel.nack(delivery, false, true);
+            return;
+          }
+          this.logger.log(
+            `Retry confirmed for notification ${notificationId}, message ${messageId}, next attempt ${attempt + 1}`,
+          );
+          channel.ack(delivery);
+          return;
+        }
+
         notification.status = NotificationStatus.FAILED;
+        notification.processedAt = new Date();
+        await this.notifications.save(notification);
+        this.logger.log(
+          `Notification ${notificationId} FAILED on attempt ${attempt}; dead-lettering message ${messageId}`,
+        );
+        channel.nack(delivery, false, false);
+        return;
       }
+
+      notification.status = NotificationStatus.SENT;
       notification.processedAt = new Date();
       await this.notifications.save(notification);
       this.logger.log(

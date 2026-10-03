@@ -1,5 +1,5 @@
 import { connect } from 'amqp-connection-manager';
-import type { Channel, ConsumeMessage } from 'amqplib';
+import type { Channel, ConfirmChannel, ConsumeMessage } from 'amqplib';
 import { Repository } from 'typeorm';
 import { Notification } from '../../../libs/notifications/src/notification.entity';
 import { NotificationStatus } from '../../../libs/notifications/src/notification.enums';
@@ -18,9 +18,13 @@ describe('NotificationWorker', () => {
     version: 1,
     occurredAt: '2026-10-03T17:34:22.917Z',
   };
+  const content = Buffer.from(JSON.stringify(payload));
   const delivery = {
-    content: Buffer.from(JSON.stringify(payload)),
-  } as ConsumeMessage;
+    content,
+    properties: { headers: { 'x-attempt': 1 } },
+  } as unknown as ConsumeMessage;
+
+  beforeEach(() => jest.clearAllMocks());
 
   function setup(status: NotificationStatus = NotificationStatus.PENDING) {
     const events: string[] = [];
@@ -50,8 +54,28 @@ describe('NotificationWorker', () => {
     const ack = jest.fn().mockImplementation(() => events.push('ack'));
     const nack = jest.fn().mockImplementation(() => events.push('nack'));
     const channel = { ack, nack } as unknown as Channel;
+    const retryPublish = jest.fn().mockImplementation(async () => {
+      events.push('retry:confirmed');
+      return true;
+    });
+    const wrapper = {
+      publish: retryPublish,
+      on: jest.fn(),
+      close: jest.fn().mockResolvedValue(undefined),
+    };
+    const manager = {
+      on: jest.fn(),
+      createChannel: jest.fn().mockReturnValue(wrapper),
+      close: jest.fn().mockResolvedValue(undefined),
+    };
+    jest
+      .mocked(connect)
+      .mockReturnValue(manager as unknown as ReturnType<typeof connect>);
+    process.env.RABBITMQ_URL = 'amqp://localhost:5672';
+    const worker = new NotificationWorker(repository, sender);
+    worker.onModuleInit();
     return {
-      worker: new NotificationWorker(repository, sender),
+      worker,
       notification,
       findOneBy,
       save,
@@ -61,7 +85,17 @@ describe('NotificationWorker', () => {
       channel,
       events,
       savedStates,
+      retryPublish,
+      wrapper,
+      manager,
     };
+  }
+
+  function failSender(context: ReturnType<typeof setup>) {
+    context.send.mockImplementation(async () => {
+      context.events.push('send');
+      throw new Error('simulated send failure');
+    });
   }
 
   it('moves PENDING through PROCESSING to SENT, then acknowledges', async () => {
@@ -113,28 +147,129 @@ describe('NotificationWorker', () => {
     ]);
   });
 
-  it('persists FAILED and processedAt before ack after sender failure', async () => {
+  it.each([1, 2])(
+    'failure on attempt %s schedules the next attempt',
+    async (attempt) => {
+      const context = setup();
+      failSender(context);
+      const currentDelivery = {
+        content,
+        properties: { headers: { 'x-attempt': attempt } },
+      } as unknown as ConsumeMessage;
+
+      await context.worker.handleDelivery(context.channel, currentDelivery);
+
+      expect(context.events).toEqual([
+        'save:PROCESSING',
+        'send',
+        'save:PENDING',
+        'retry:confirmed',
+        'ack',
+      ]);
+      expect(context.savedStates[1]).toEqual({
+        status: NotificationStatus.PENDING,
+        processedAt: null,
+      });
+      expect(context.retryPublish).toHaveBeenCalledWith(
+        'notifications.retry.exchange',
+        'notification.retry',
+        content,
+        {
+          persistent: true,
+          contentType: 'application/json',
+          messageId,
+          headers: { 'x-attempt': attempt + 1 },
+        },
+      );
+      expect(context.ack).toHaveBeenCalledWith(currentDelivery);
+      expect(context.nack).not.toHaveBeenCalled();
+    },
+  );
+
+  it('treats a missing x-attempt header as attempt 1', async () => {
     const context = setup();
-    context.send.mockImplementation(async () => {
-      context.events.push('send');
-      throw new Error('simulated send failure');
-    });
+    failSender(context);
+    const oldDelivery = {
+      content,
+      properties: { headers: {} },
+    } as unknown as ConsumeMessage;
+
+    await context.worker.handleDelivery(context.channel, oldDelivery);
+
+    expect(context.retryPublish.mock.calls[0][3]).toEqual(
+      expect.objectContaining({ headers: { 'x-attempt': 2 } }),
+    );
+  });
+
+  it('acks the original only after retry publisher confirm', async () => {
+    const context = setup();
+    failSender(context);
+    let confirm!: (value: boolean) => void;
+    context.retryPublish.mockReturnValue(
+      new Promise<boolean>((resolve) => (confirm = resolve)),
+    );
+
+    const pending = context.worker.handleDelivery(context.channel, delivery);
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(context.retryPublish).toHaveBeenCalledTimes(1);
+    expect(context.ack).not.toHaveBeenCalled();
+
+    confirm(true);
+    await pending;
+    expect(context.ack).toHaveBeenCalledWith(delivery);
+  });
+
+  it('does not ack the original when retry publication fails', async () => {
+    const context = setup();
+    failSender(context);
+    context.retryPublish.mockRejectedValue(new Error('publisher timeout'));
 
     await context.worker.handleDelivery(context.channel, delivery);
+
+    expect(context.notification.status).toBe(NotificationStatus.PENDING);
+    expect(context.notification.processedAt).toBeNull();
+    expect(context.ack).not.toHaveBeenCalled();
+    expect(context.nack).toHaveBeenCalledWith(delivery, false, true);
+  });
+
+  it('persists FAILED with processedAt and dead-letters attempt 3', async () => {
+    const context = setup();
+    failSender(context);
+    const finalDelivery = {
+      content,
+      properties: { headers: { 'x-attempt': 3 } },
+    } as unknown as ConsumeMessage;
+
+    await context.worker.handleDelivery(context.channel, finalDelivery);
 
     expect(context.events).toEqual([
       'save:PROCESSING',
       'send',
       'save:FAILED',
-      'ack',
+      'nack',
     ]);
-    expect(context.notification.status).toBe(NotificationStatus.FAILED);
-    expect(context.notification.processedAt).toBeInstanceOf(Date);
     expect(context.savedStates[1]).toEqual({
       status: NotificationStatus.FAILED,
       processedAt: expect.any(Date),
     });
-    expect(context.nack).not.toHaveBeenCalled();
+    expect(context.retryPublish).not.toHaveBeenCalled();
+    expect(context.ack).not.toHaveBeenCalled();
+    expect(context.nack).toHaveBeenCalledWith(finalDelivery, false, false);
+  });
+
+  it('dead-letters FAILED final redelivery without sending again', async () => {
+    const context = setup(NotificationStatus.FAILED);
+    const finalDelivery = {
+      content,
+      properties: { headers: { 'x-attempt': 3 } },
+    } as unknown as ConsumeMessage;
+
+    await context.worker.handleDelivery(context.channel, finalDelivery);
+
+    expect(context.send).not.toHaveBeenCalled();
+    expect(context.save).not.toHaveBeenCalled();
+    expect(context.ack).not.toHaveBeenCalled();
+    expect(context.nack).toHaveBeenCalledWith(finalDelivery, false, false);
   });
 
   it('nacks without requeue when the Notification does not exist', async () => {
@@ -190,22 +325,7 @@ describe('NotificationWorker', () => {
 
   it('declares topology, prefetches one, consumes with manual ack, and closes', async () => {
     const context = setup();
-    const wrapper = {
-      on: jest.fn(),
-      close: jest.fn().mockResolvedValue(undefined),
-    };
-    const manager = {
-      on: jest.fn(),
-      createChannel: jest.fn().mockReturnValue(wrapper),
-      close: jest.fn().mockResolvedValue(undefined),
-    };
-    jest
-      .mocked(connect)
-      .mockReturnValue(manager as unknown as ReturnType<typeof connect>);
-    process.env.RABBITMQ_URL = 'amqp://localhost:5672';
-
-    context.worker.onModuleInit();
-    const options = manager.createChannel.mock.calls[0][0];
+    const options = context.manager.createChannel.mock.calls[0][0];
     const rawChannel = {
       assertExchange: jest.fn().mockResolvedValue(undefined),
       assertQueue: jest.fn().mockResolvedValue(undefined),
@@ -213,10 +333,10 @@ describe('NotificationWorker', () => {
       prefetch: jest.fn().mockResolvedValue(undefined),
       consume: jest.fn().mockResolvedValue({ consumerTag: 'worker' }),
     };
-    await options.setup(rawChannel as unknown as Channel);
+    await options.setup(rawChannel as unknown as ConfirmChannel);
 
-    expect(manager.createChannel).toHaveBeenCalledWith(
-      expect.objectContaining({ confirm: false }),
+    expect(context.manager.createChannel).toHaveBeenCalledWith(
+      expect.objectContaining({ confirm: true, publishTimeout: 5000 }),
     );
     expect(rawChannel.assertExchange).toHaveBeenCalledWith(
       'notifications.exchange',
@@ -225,12 +345,39 @@ describe('NotificationWorker', () => {
     );
     expect(rawChannel.assertQueue).toHaveBeenCalledWith(
       'notifications.process',
-      { durable: true },
+      {
+        durable: true,
+        arguments: {
+          'x-dead-letter-exchange': 'notifications.dlx',
+          'x-dead-letter-routing-key': 'notification.dead-letter',
+        },
+      },
     );
+    expect(rawChannel.assertQueue).toHaveBeenCalledWith('notifications.retry', {
+      durable: true,
+      arguments: {
+        'x-message-ttl': 5000,
+        'x-dead-letter-exchange': 'notifications.exchange',
+        'x-dead-letter-routing-key': 'notification.requested',
+      },
+    });
+    expect(rawChannel.assertQueue).toHaveBeenCalledWith('notifications.dlq', {
+      durable: true,
+    });
     expect(rawChannel.bindQueue).toHaveBeenCalledWith(
       'notifications.process',
       'notifications.exchange',
       'notification.requested',
+    );
+    expect(rawChannel.bindQueue).toHaveBeenCalledWith(
+      'notifications.retry',
+      'notifications.retry.exchange',
+      'notification.retry',
+    );
+    expect(rawChannel.bindQueue).toHaveBeenCalledWith(
+      'notifications.dlq',
+      'notifications.dlx',
+      'notification.dead-letter',
     );
     expect(rawChannel.prefetch).toHaveBeenCalledWith(1);
     expect(rawChannel.consume).toHaveBeenCalledWith(
@@ -239,7 +386,7 @@ describe('NotificationWorker', () => {
       { noAck: false },
     );
     await context.worker.onApplicationShutdown();
-    expect(wrapper.close).toHaveBeenCalledTimes(1);
-    expect(manager.close).toHaveBeenCalledTimes(1);
+    expect(context.wrapper.close).toHaveBeenCalledTimes(1);
+    expect(context.manager.close).toHaveBeenCalledTimes(1);
   });
 });

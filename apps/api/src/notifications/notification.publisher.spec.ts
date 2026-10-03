@@ -49,7 +49,24 @@ describe('NotificationPublisher', () => {
     );
     expect(amqpChannel.assertQueue).toHaveBeenCalledWith(
       'notifications.process',
-      { durable: true },
+      {
+        durable: true,
+        arguments: {
+          'x-dead-letter-exchange': 'notifications.dlx',
+          'x-dead-letter-routing-key': 'notification.dead-letter',
+        },
+      },
+    );
+    expect(amqpChannel.assertQueue).toHaveBeenCalledWith(
+      'notifications.retry',
+      {
+        durable: true,
+        arguments: {
+          'x-message-ttl': 5000,
+          'x-dead-letter-exchange': 'notifications.exchange',
+          'x-dead-letter-routing-key': 'notification.requested',
+        },
+      },
     );
     expect(amqpChannel.bindQueue).toHaveBeenCalledWith(
       'notifications.process',
@@ -97,6 +114,7 @@ describe('NotificationPublisher', () => {
       persistent: true,
       contentType: 'application/json',
       messageId: payload.messageId,
+      headers: { 'x-attempt': 1 },
     });
 
     confirm(true);
