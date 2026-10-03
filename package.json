@@ -9,16 +9,22 @@
     "build:worker": "nest build worker",
     "start:dev:api": "nest start api --watch",
     "start:dev:worker": "nest start worker --watch",
-    "lint": "eslint \"apps/**/*.ts\"",
-    "format:check": "prettier --check \"apps/**/*.ts\" \"apps/**/tsconfig.app.json\" package.json nest-cli.json tsconfig.json jest.config.cjs eslint.config.cjs .prettierrc",
+    "migration:run": "typeorm-ts-node-commonjs -d libs/notifications/src/typeorm.config.ts migration:run",
+    "migration:revert": "typeorm-ts-node-commonjs -d libs/notifications/src/typeorm.config.ts migration:revert",
+    "lint": "eslint \"{apps,libs}/**/*.ts\"",
+    "format:check": "prettier --check \"{apps,libs}/**/*.ts\" \"apps/**/tsconfig.app.json\" package.json nest-cli.json tsconfig.json jest.config.cjs eslint.config.cjs .prettierrc docker-compose.yml",
     "test": "jest --runInBand"
   },
   "dependencies": {
     "@nestjs/common": "11.0.5",
     "@nestjs/core": "11.0.5",
     "@nestjs/platform-express": "11.0.5",
+    "@nestjs/typeorm": "11.0.3",
+    "dotenv": "16.6.1",
+    "mysql2": "3.24.5",
     "reflect-metadata": "0.2.2",
-    "rxjs": "7.8.1"
+    "rxjs": "7.8.1",
+    "typeorm": "0.3.31"
   },
   "devDependencies": {
     "@nestjs/cli": "11.0.2",
@@ -32,6 +38,7 @@
     "jest": "29.7.0",
     "prettier": "3.4.2",
     "ts-jest": "29.2.5",
+    "ts-node": "10.9.2",
     "typescript": "5.7.3"
   }
 }
