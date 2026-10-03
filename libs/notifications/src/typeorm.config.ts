@@ -10,6 +10,7 @@ export const notificationDataSourceOptions: DataSourceOptions = {
   username: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
+  timezone: 'Z',
   entities: [Notification],
   migrations: [CreateNotifications1790899200000],
   synchronize: false,

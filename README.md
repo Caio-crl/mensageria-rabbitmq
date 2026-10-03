@@ -35,6 +35,9 @@ current database status (HTTP 200). For example, after processing:
 `{"id":"uuid","type":"EMAIL","recipient":"user@example.com","status":"SENT","createdAt":"2026-10-03T12:00:00.000Z","processedAt":"2026-10-03T12:00:05.000Z"}`.
 Before completion, `processedAt` is null. An invalid UUID returns 400; an
 unknown valid UUID returns 404.
+API timestamps are serialized as ISO-8601 in UTC. Existing local Notifications
+written before the UTC driver setting may contain timestamps interpreted under
+the previous local timezone; this checkpoint does not rewrite those rows.
 
 Publication has a 5000 ms timeout. If it fails, the API returns HTTP 503 while
 the database row remains PENDING. This MySQL/RabbitMQ consistency gap is a known

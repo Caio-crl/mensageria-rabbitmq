@@ -13,6 +13,13 @@ describe('Notification persistence configuration', () => {
     expect(notificationDataSourceOptions.migrations).toHaveLength(1);
   });
 
+  it('uses UTC for MySQL date reads and writes', () => {
+    expect(notificationDataSourceOptions).toMatchObject({
+      type: 'mysql',
+      timezone: 'Z',
+    });
+  });
+
   it('defines only the notification types and statuses in this checkpoint', () => {
     expect(Object.values(NotificationType)).toEqual(['EMAIL']);
     expect(Object.values(NotificationStatus)).toEqual([
